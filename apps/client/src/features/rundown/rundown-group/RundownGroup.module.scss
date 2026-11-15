@@ -1,0 +1,112 @@
+@use '../blockMixins' as *;
+
+.group {
+  @include block-styling;
+
+  margin-block: 0.5rem;
+  display: grid;
+  grid-template-columns: 2rem 1fr;
+  grid-template-areas: 'binder header';
+  align-items: center;
+
+  &.hasCursor {
+    outline: 1px solid $block-cursor-color;
+    outline-offset: -1px;
+  }
+
+  &.copyTarget {
+    outline: 2px dashed $block-cursor-color;
+    outline-offset: -2px;
+  }
+
+  &.expanded {
+    margin-block: 0.5rem 0;
+    border-radius: $block-border-radius $block-border-radius 0 0;
+    border-bottom: 1px solid color-mix(in srgb, transparent 90%, var(--user-bg, transparent) 10%);
+  }
+
+  .binder {
+    @include drag-surface;
+
+    grid-area: binder;
+    height: 100%;
+    background-color: var(--user-bg, $gray-1050);
+    color: $section-white;
+    font-size: 1rem;
+    display: grid;
+    place-content: center;
+    position: relative;
+  }
+
+  .header {
+    grid-area: header;
+    padding-inline: 0.5rem;
+    padding-bottom: 0.25rem;
+    background-color: $block-bg2;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .titleRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .metaRow {
+    display: flex;
+    gap: $block-clearance; // same as RundownEvent.eventTimers
+    padding-left: 0.125rem;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .metaEntry {
+    width: 8rem; // timeInput + button
+
+    &:first-of-type {
+      width: 4.5rem; // binder + buttons
+    }
+  }
+
+  .metaLabel {
+    color: $muted-gray;
+    font-size: calc(1rem - 3px);
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+}
+
+.duration {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: $ui-white;
+
+  &.warning {
+    .strike {
+      // color: $playback-over;
+      text-decoration: wavy underline;
+      text-decoration-color: $playback-over;
+    }
+    .offsetLabel {
+      background-color: $playback-over;
+    }
+  }
+}
+
+.lockIcon {
+  color: $muted-gray;
+}
+
+.target {
+  display: contents;
+}
+
+.drag {
+  @include drag-style;
+  position: absolute;
+  margin-top: 0.25rem;
+}

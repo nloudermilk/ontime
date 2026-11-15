@@ -1,0 +1,69 @@
+.link {
+  display: flex;
+  align-items: center;
+
+  padding: 0.625rem 1.25rem;
+  gap: 0.625rem;
+  width: 100%;
+
+  border-left: 3px solid transparent;
+  color: $gray-200;
+  font-size: $text-body-size;
+  white-space: nowrap;
+  text-align: left;
+
+  cursor: pointer;
+
+  transition-property: color, background-color;
+  transition-duration: $transition-time-action;
+
+  // keep icons on a fixed box so labels align regardless of the glyph
+  > svg {
+    flex-shrink: 0;
+    width: 1.125rem;
+    height: 1.125rem;
+    color: $gray-500;
+    transition: color $transition-time-action;
+  }
+
+  &:hover {
+    background-color: $white-3;
+    color: $ui-white;
+
+    > svg {
+      color: $gray-300;
+    }
+  }
+
+  &:active {
+    background-color: $white-7;
+  }
+
+  &:focus-visible {
+    outline: 2px solid $blue-500;
+    outline-offset: -2px;
+    background-color: $white-3;
+  }
+
+  // toggle rows are labels, the focusable control sits inside them
+  &:focus-within {
+    background-color: $white-3;
+  }
+
+  &.current {
+    background-color: $bg-active;
+    border-left-color: $blue-400;
+    color: $ui-white;
+    font-weight: 600;
+
+    > svg {
+      color: $blue-300;
+    }
+  }
+}
+
+.label {
+  flex: 1;
+  min-width: 0;
+  @include ellipsis-text;
+}

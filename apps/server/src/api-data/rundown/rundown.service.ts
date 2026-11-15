@@ -1,0 +1,871 @@
+import {
+  CustomField,
+  CustomFieldKey,
+  CustomFields,
+  EntryId,
+  EventPostPayload,
+  ImportedFields,
+  InsertOptions,
+  LogOrigin,
+  OntimeEntry,
+  OntimeGroup,
+  PatchWithId,
+  ProjectRundowns,
+  RefetchKey,
+  Rundown,
+  RundownImportMergeStrategy,
+  isOntimeDelay,
+  isOntimeEvent,
+  isOntimeGroup,
+} from 'ontime-types';
+import {
+  customFieldLabelToKey,
+  generateId,
+  getErrorMessage,
+  getInsertAfterId,
+  renameScriptSource,
+  resolveInsertParent,
+  validateRundownTitle,
+} from 'ontime-utils';
+
+import { getDataProvider } from '../../classes/data-provider/DataProvider.js';
+import { makeNewRundown } from '../../models/dataModel.js';
+import { setLastLoadedRundown } from '../../services/app-state-service/appState.service.js';
+import { notifyChange } from '../../services/change-service/change.service.js';
+import { runtimeService } from '../../services/runtime-service/runtime.service.js';
+import { parseCustomFields } from '../custom-fields/customFields.parser.js';
+import * as logger from '../logs/logs.service.js';
+import {
+  createTransaction,
+  customFieldMutation,
+  getCurrentRundownId,
+  getStoredRundown,
+  replaceStoredRundown,
+  rundownCache,
+  rundownMutation,
+} from './rundown.dao.js';
+import {
+  CustomFieldExistsError,
+  CustomFieldNotFoundError,
+  CustomFieldTypeChangeError,
+  EntryExistsError,
+  EntryNotFoundError,
+  InvalidCustomFieldLabelError,
+  InvalidEntryOperationError,
+  InvalidRundownTitleError,
+  RundownDeleteConflictError,
+} from './rundown.errors.js';
+import { parseRundown, sanitiseCustomFields } from './rundown.parser.js';
+import {
+  cloneRundown,
+  getDuplicatedRundownTitle,
+  generateEvent,
+  getFirstInsertId,
+  getIntegerAndFraction,
+  getLastInsertId,
+  getPreviousInsertId,
+  hasChanges,
+  mergeRundownPreservingFields,
+  eventDurationMatchGroupTarget,
+} from './rundown.utils.js';
+import { assertInsertAnchorExists, assertInsertAnchorInOrder, assertSingleInsertAnchor } from './rundown.validation.js';
+
+/**
+ * creates a new entry with given data
+ */
+export async function addEntry(rundownId: string, eventData: EventPostPayload): Promise<OntimeEntry> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  assertSingleInsertAnchor(eventData);
+
+  // we allow the user to provide an ID, but make sure it is unique
+  if (eventData?.id && Object.hasOwn(rundown.entries, eventData.id)) {
+    throw new EntryExistsError(eventData.id);
+  }
+
+  // resolve the parent, either from the payload or inferred from sibling position
+  const parentId = resolveInsertParent(rundown, eventData);
+  let parent: OntimeGroup | null = null;
+  if (parentId) {
+    const maybeParent = rundown.entries[parentId];
+    if (!maybeParent || !isOntimeGroup(maybeParent)) {
+      throw new InvalidEntryOperationError(`Invalid parent event with ID ${parentId}`);
+    }
+    parent = maybeParent;
+  }
+
+  assertInsertAnchorInOrder(rundown, parent, eventData);
+
+  // normalise the position of the event in the rundown order
+  const insertPosition = (() => {
+    if (eventData.before !== undefined) {
+      const beforeId = getFirstInsertId(rundown, parent, eventData.before);
+      return { afterId: null, beforeId, cueAfterId: getPreviousInsertId(rundown, parent, beforeId) };
+    }
+
+    // if after is an ID, we will try and find the entry
+    if (eventData.after !== undefined && eventData.after !== true) {
+      const afterId = getInsertAfterId(rundown, parent, eventData.after);
+      return { afterId, beforeId: null, cueAfterId: afterId };
+    }
+
+    return { afterId: null, beforeId: null, cueAfterId: getLastInsertId(rundown, parent) };
+  })();
+
+  // generate a fully formed entry from the patch
+  const newEntry = generateEvent(rundown, eventData, insertPosition.cueAfterId, parent?.id);
+  if (parent && isOntimeGroup(newEntry)) {
+    throw new InvalidEntryOperationError('Cannot add a group to another group');
+  }
+
+  // make mutations to rundown
+  rundownMutation.add(rundown, newEntry, parent, insertPosition.afterId, insertPosition.beforeId);
+
+  const { rundown: responseRundown, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return responseRundown.entries[newEntry.id] ?? newEntry;
+}
+
+/**
+ * Applies a patch to an entry in the rundown
+ */
+export async function editEntry(rundownId: string, patch: PatchWithId): Promise<OntimeEntry> {
+  const { rundown, customFields, commit } = createTransaction({ rundownId, mutableRundown: true });
+  const currentEntry = rundown.entries[patch.id];
+
+  /**
+   * We validate the patch before applying it
+   * - disallow edit an entry that does not exist
+   * - disallow setting the cue to empty string
+   * - disallow change the type of an entry
+   */
+
+  // could the entry have been deleted?
+  if (!currentEntry) {
+    throw new EntryNotFoundError('Entry not found');
+  }
+
+  // we cannot allow patching to a different type
+  if (patch?.type && currentEntry.type !== patch.type) {
+    throw new InvalidEntryOperationError('Invalid event type');
+  }
+
+  // if nothing changed, nothing to do
+  if (!hasChanges(currentEntry, patch)) {
+    return currentEntry;
+  }
+
+  const { entry, didInvalidate } = rundownMutation.edit(rundown, patch);
+  sanitiseEditedCustomFields(customFields, entry, patch);
+  const { rundown: responseRundown, revision } = await commit(didInvalidate);
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return responseRundown.entries[entry.id] ?? entry;
+}
+
+/**
+ * Applies a patch to several entries in the rundown
+ */
+export async function batchEditEntries(
+  rundownId: string,
+  ids: EntryId[],
+  patch: Partial<OntimeEntry>,
+): Promise<Rundown> {
+  const { rundown, customFields, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  /**
+   * We can do some validation globally, but mostly we will validate each entry individually
+   * - disallow setting the cue to empty string
+   */
+  if ('cue' in patch && patch.cue === '') {
+    throw new InvalidEntryOperationError('Cue value invalid');
+  }
+
+  let batchDidInvalidate = false;
+
+  for (let i = 0; i < ids.length; i++) {
+    const currentId = ids[i];
+    const currentEntry = rundown.entries[currentId];
+    /**
+     * Most of the validation needs to be done in regard to the change
+     * - cannot edit an entry that does not exist
+     * - disallow change the type of an entry
+     * - disallow change the ID of an entry
+     */
+    // could the entry have been deleted?
+    if (!currentEntry) {
+      continue;
+    }
+
+    // we cannot allow patching to a different type
+    if (patch?.type && currentEntry.type !== patch.type) {
+      throw new InvalidEntryOperationError('Invalid event type');
+    }
+
+    // if nothing changed, nothing to do
+    if (!hasChanges(currentEntry, patch)) {
+      continue;
+    }
+
+    const { entry, didInvalidate } = rundownMutation.edit(rundown, { ...patch, id: currentId });
+    sanitiseEditedCustomFields(customFields, entry, patch);
+
+    if (didInvalidate) {
+      batchDidInvalidate = true;
+    }
+  }
+  const { rundown: rundownResult, revision } = await commit(batchDidInvalidate);
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Custom field edits do not trigger processing, which is where entries are sanitised
+ * We drop values for fields which do not exist in the project, as processing would
+ */
+function sanitiseEditedCustomFields(customFields: CustomFields, entry: OntimeEntry, patch: Partial<OntimeEntry>) {
+  if ('custom' in patch && 'custom' in entry) {
+    sanitiseCustomFields(customFields, entry);
+  }
+}
+
+/**
+ * Deletes a known entry from the current rundown
+ */
+export async function deleteEntries(rundownId: string, entryIds: EntryId[]): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  for (let i = 0; i < entryIds.length; i++) {
+    const entry = rundown.entries[entryIds[i]];
+    if (!entry) {
+      continue;
+    }
+    rundownMutation.remove(rundown, entry);
+  }
+
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Deletes all entries from the current rundown
+ */
+export async function deleteAllEntries(rundownId: string): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  rundownMutation.removeAll(rundown);
+
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Moves an event to a new position in the rundown
+ * Handles moving across root orders (a group order and top level order)
+ * @throws if entryId or destinationId not found
+ */
+export async function reorderEntry(
+  rundownId: string,
+  entryId: EntryId,
+  destinationId: EntryId,
+  order: 'before' | 'after' | 'insert',
+) {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  // check that both entries exist
+  const eventFrom = rundown.entries[entryId];
+  const eventTo = rundown.entries[destinationId];
+
+  if (!eventFrom || !eventTo) {
+    throw new EntryNotFoundError('Event not found');
+  }
+
+  rundownMutation.reorder(rundown, eventFrom, eventTo, order);
+
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * @throws if an id is missing or not an Ontime event
+ */
+export async function renumberEntries(
+  rundownId: string,
+  ids: EntryId[],
+  prefix: string,
+  start: string,
+  increment: string,
+): Promise<Rundown> {
+  const startNumber = getIntegerAndFraction(start);
+  const incrementNumber = getIntegerAndFraction(increment);
+
+  // if the prefix doesn't already include a separator or is empty, then insert a separator
+  if (prefix !== '' && !prefix.endsWith('-') && !prefix.endsWith(' ')) prefix += ' ';
+
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true, mutableCustomFields: false });
+
+  rundownMutation.renumber(rundown, ids, prefix, startNumber, incrementNumber);
+
+  const { rundown: rundownResult, revision } = await commit(false);
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Applies a delay into the rundown effectively changing the schedule
+ * The applied delay is deleted
+ */
+export async function applyDelay(rundownId: string, delayId: EntryId): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  // check that delay exists
+  const delay = rundown.entries[delayId];
+  if (!delay) {
+    throw new EntryNotFoundError('Given delay ID not found');
+  }
+  if (!isOntimeDelay(delay)) {
+    throw new InvalidEntryOperationError('Given delay ID not found');
+  }
+
+  // apply the delay and delete the it
+  rundownMutation.applyDelay(rundown, delay);
+  rundownMutation.remove(rundown, delay);
+
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Swaps the data between two events in the rundown
+ */
+export async function swapEvents(rundownId: string, fromId: EntryId, toId: EntryId): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+  const eventFrom = rundown.entries[fromId];
+  const eventTo = rundown.entries[toId];
+
+  // check that both entries exist
+  if (!eventFrom || !eventTo) {
+    throw new EntryNotFoundError('Event not found');
+  }
+
+  // we can only swap events
+  if (!isOntimeEvent(eventFrom) || !isOntimeEvent(eventTo)) {
+    throw new InvalidEntryOperationError('Both entries must be events');
+  }
+
+  rundownMutation.swap(rundown, eventFrom, eventTo);
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Clones an entry, ensuring that all dependencies are preserved
+ * Handles cloning children if the entry is a group
+ * @throws if the entry to clone does not exist
+ */
+export async function cloneEntry(rundownId: string, entryId: EntryId, options: InsertOptions): Promise<Rundown> {
+  assertSingleInsertAnchor(options);
+
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+  assertInsertAnchorExists(rundown, options);
+  const originalEntry = rundown.entries[entryId];
+
+  if (!originalEntry) {
+    throw new EntryNotFoundError('Could not find entry to clone');
+  }
+
+  rundownMutation.clone(rundown, originalEntry, options);
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ *  Change a events duration to fit inside the group target
+ */
+export async function entryFitGroupDuration(rundownId: string, entryId: EntryId): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  const entry = rundown.entries[entryId];
+
+  if (!entry) {
+    throw new EntryNotFoundError('Entry not found');
+  }
+
+  if (!isOntimeEvent(entry)) {
+    throw new InvalidEntryOperationError('Entry must be an event');
+  }
+
+  const { parent } = entry;
+  if (!parent) {
+    throw new InvalidEntryOperationError('Entry must be in a group');
+  }
+
+  const group = rundown.entries[parent];
+
+  if (!group) {
+    throw new EntryNotFoundError('Group not found');
+  }
+
+  if (!isOntimeGroup(group)) {
+    throw new InvalidEntryOperationError('Group is not a group');
+  }
+
+  const newDuration = eventDurationMatchGroupTarget({
+    targetDuration: group.targetDuration,
+    groupDuration: group.duration,
+    eventDuration: entry.duration,
+  });
+
+  if (newDuration === null) {
+    throw new InvalidEntryOperationError('Unable to fit a duration');
+  }
+
+  const newEnd = entry.timeStart + newDuration;
+
+  rundownMutation.edit(rundown, {
+    id: entryId,
+    duration: newDuration,
+    timeEnd: newEnd,
+    timeStrategy: entry.timeStrategy,
+  });
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Groups a list of entries into a new group
+ */
+export async function groupEntries(rundownId: string, entryIds: EntryId[]): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  rundownMutation.group(rundown, entryIds);
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Deletes a group and moves all its children to the top level
+ */
+export async function ungroupEntries(rundownId: string, groupId: EntryId): Promise<Rundown> {
+  const { rundown, commit } = createTransaction({ rundownId, mutableRundown: true });
+
+  const group = rundown.entries[groupId];
+  if (!group) {
+    throw new EntryNotFoundError(`Group with ID ${groupId} not found or is not a group`);
+  }
+  if (!isOntimeGroup(group)) {
+    throw new InvalidEntryOperationError(`Group with ID ${groupId} not found or is not a group`);
+  }
+
+  rundownMutation.ungroup(rundown, group);
+  const { rundown: rundownResult, revision } = await commit();
+  notifyChange(RefetchKey.Rundown, revision, rundown.id);
+
+  return rundownResult;
+}
+
+/**
+ * Adds a new custom field to the project
+ * @throws if the label is missing or invalid
+ * @throws if the label already exists
+ */
+export async function createCustomField(customField: CustomField): Promise<CustomFields> {
+  const key = customFieldLabelToKey(customField.label);
+
+  if (!key) {
+    throw new InvalidCustomFieldLabelError();
+  }
+
+  const { customFields, commit } = createTransaction({ mutableRundown: false, mutableCustomFields: true });
+
+  // check if label already exists
+  if (Object.hasOwn(customFields, key)) {
+    throw new CustomFieldExistsError(customField.label);
+  }
+
+  customFieldMutation.add(customFields, key, customField);
+
+  // Adding a custom field has no immediate implications on the rundown
+  const { customFields: resultCustomFields } = await commit(false);
+
+  notifyChange(RefetchKey.CustomFields);
+
+  return resultCustomFields;
+}
+
+/**
+ * Applies a mutation to all rundowns other than the given loaded one
+ * Each rundown is read, mutated and stored without yielding in between,
+ * so a concurrent edit to a background rundown cannot be overwritten by a stale copy
+ */
+async function updateBackgroundRundowns(loadedRundownId: string, mutate: (rundown: Rundown) => void) {
+  const projectRundowns = getDataProvider().getProjectRundowns();
+  const writes: Promise<unknown>[] = [];
+  for (const rundownId of Object.keys(projectRundowns)) {
+    if (rundownId === loadedRundownId) continue;
+    const backgroundRundown = cloneRundown(projectRundowns[rundownId]);
+    mutate(backgroundRundown);
+    // setRundown stores the rundown synchronously, only persisting is deferred
+    writes.push(getDataProvider().setRundown(rundownId, backgroundRundown));
+  }
+  await Promise.all(writes);
+}
+
+/**
+ * Edits an existing custom field
+ * In practice users can only change the label and the colour of the field
+ * @throws if the field does not exist
+ * @throws if the field type is changed
+ */
+export async function editCustomField(key: CustomFieldKey, newField: Partial<CustomField>): Promise<CustomFields> {
+  const { customFields, rundown, commit } = createTransaction({
+    mutableRundown: true,
+    mutableCustomFields: true,
+  });
+
+  if (!(key in customFields)) {
+    throw new CustomFieldNotFoundError(key);
+  }
+
+  const existingField = customFields[key];
+  // if user provides a type, it must be the same from before
+  if (newField.type && existingField.type !== newField.type) {
+    throw new CustomFieldTypeChangeError();
+  }
+
+  const { oldKey, newKey } = customFieldMutation.edit(customFields, key, existingField, newField);
+
+  const didChangeKey = oldKey !== newKey;
+  // if key has changed ...
+  if (didChangeKey) {
+    // ... reassign references in the active rundown
+    customFieldMutation.renameUsages(rundown, oldKey, newKey);
+
+    // ... delete the old key
+    customFieldMutation.remove(customFields, oldKey);
+  }
+
+  // the custom fields have been removed and there is no processing to be done
+  const { revision, customFields: resultCustomFields } = await commit(false);
+
+  // ... and reassign references in the background rundowns
+  if (didChangeKey) {
+    await updateBackgroundRundowns(rundown.id, (backgroundRundown) =>
+      customFieldMutation.renameUsages(backgroundRundown, oldKey, newKey),
+    );
+  }
+  const didChangeScriptSource = didChangeKey && (await renameScriptSourceUsage(oldKey, newKey));
+
+  // schedule the side effects
+  notifyChange(RefetchKey.CustomFields);
+  if (didChangeScriptSource) notifyChange(RefetchKey.Teleprompter);
+  notifyChange(RefetchKey.Rundown, revision);
+
+  return resultCustomFields;
+}
+
+/**
+ * The teleprompter's script source is a usage of a custom field, renamed or reset with it
+ * @returns whether the source changed
+ */
+async function renameScriptSourceUsage(oldKey: CustomFieldKey, newKey: CustomFieldKey | null): Promise<boolean> {
+  const settings = getDataProvider().getTeleprompterSettings();
+  const script = renameScriptSource(settings.script, oldKey, newKey);
+  if (script === settings.script) return false;
+  await getDataProvider().setTeleprompterSettings({ ...settings, script });
+  return true;
+}
+
+/**
+ * Deletes an existing custom field
+ */
+export async function deleteCustomField(key: CustomFieldKey): Promise<CustomFields> {
+  const { customFields, rundown, commit } = createTransaction({
+    mutableRundown: true,
+    mutableCustomFields: true,
+  });
+  if (!(key in customFields)) {
+    return customFields;
+  }
+
+  // remove references in the active rundown
+  customFieldMutation.removeUsages(rundown, key);
+
+  // delete the old key
+  customFieldMutation.remove(customFields, key);
+
+  // the custom fields have been removed and there is no processing to be done
+  const { revision, customFields: resultCustomFields } = await commit(false);
+
+  // remove references in the background rundowns
+  await updateBackgroundRundowns(rundown.id, (backgroundRundown) =>
+    customFieldMutation.removeUsages(backgroundRundown, key),
+  );
+  const didChangeScriptSource = await renameScriptSourceUsage(key, null);
+
+  // schedule the side effects
+  notifyChange(RefetchKey.CustomFields);
+  if (didChangeScriptSource) notifyChange(RefetchKey.Teleprompter);
+  notifyChange(RefetchKey.Rundown, revision);
+
+  return resultCustomFields;
+}
+
+/**
+ * Merges a set of custom fields into the project, replacing fields with the same key
+ * Commits through the rundown cache so the in-memory custom fields stay in step with the persisted ones
+ */
+export async function mergeCustomFields(newCustomFields: CustomFields): Promise<CustomFields> {
+  const { customFields, commit } = createTransaction({ mutableRundown: false, mutableCustomFields: true });
+  Object.assign(customFields, newCustomFields);
+
+  // adding custom fields has no immediate implications on the rundown
+  const { customFields: resultCustomFields } = await commit(false);
+
+  notifyChange(RefetchKey.CustomFields);
+
+  return resultCustomFields;
+}
+
+export function isCurrentRundown(id: string) {
+  return id === getCurrentRundownId();
+}
+
+/**
+ * @throws if the provided id does not exist
+ */
+export async function loadRundown(id: string) {
+  const dataProvider = getDataProvider();
+  if (isCurrentRundown(id)) {
+    return dataProvider.getProjectRundowns();
+  }
+
+  const rundown = getStoredRundown(id);
+  const customField = dataProvider.getCustomFields();
+  await initRundown(rundown, customField);
+  return dataProvider.getProjectRundowns();
+}
+
+/**
+ * Sets a new rundown in the cache and marks it as the currently loaded one.
+ * Switching to a rundown always stops playback.
+ */
+export async function initRundown(
+  rundown: Readonly<Rundown>,
+  customFields: Readonly<CustomFields>,
+  reload: boolean = false,
+) {
+  runtimeService.stop();
+  const { revision } = rundownCache.init(rundown, customFields);
+  logger.info(LogOrigin.Server, 'Rundown loaded', { rundown: rundown.title || rundown.id });
+
+  // a reload refetches everything, the rundown list included
+  if (reload) {
+    notifyChange(RefetchKey.All);
+  } else {
+    notifyChange(RefetchKey.Rundown, revision, rundown.id);
+    notifyChange(RefetchKey.ProjectRundowns);
+  }
+  setLastLoadedRundown(rundown.id).catch((error) => {
+    logger.error(LogOrigin.Server, 'Last rundown save failed', { error: getErrorMessage(error) });
+  });
+}
+
+/**
+ * Replaces a stored rundown, loaded or background, with a supplied one which keeps the target id
+ * The supplied rundown is untrusted: it is parsed against the project custom fields and processed again
+ * Replacing the loaded rundown is a change, not a switch: the runtime reconciles with it,
+ * so playback continues while the loaded event can still play
+ * @throws if the target rundown does not exist
+ */
+export async function replaceRundown(rundownId: string, incoming: Readonly<Rundown>) {
+  const dataProvider = getDataProvider();
+  const existing = getStoredRundown(rundownId);
+  const customFields = dataProvider.getCustomFields();
+
+  const parsed = parseRundown({ ...incoming, id: rundownId }, customFields);
+  parsed.revision = existing.revision + 1;
+
+  await replaceStoredRundown(parsed);
+
+  notifyChange(RefetchKey.Rundown, parsed.revision, rundownId);
+  // the rundown list shows titles and entry counts
+  if (existing.title !== parsed.title || existing.flatOrder.length !== parsed.flatOrder.length) {
+    notifyChange(RefetchKey.ProjectRundowns);
+  }
+}
+
+export async function createNewRundown(title: string) {
+  const titleError = validateRundownTitle(title);
+  if (titleError) throw new InvalidRundownTitleError(titleError);
+  title = title.trim();
+
+  const emptyRundown = makeNewRundown();
+  emptyRundown.title = title;
+  await getDataProvider().setRundown(emptyRundown.id, emptyRundown);
+
+  const projectRundowns = getDataProvider().getProjectRundowns();
+
+  notifyChange(RefetchKey.ProjectRundowns);
+
+  return projectRundowns;
+}
+
+/**
+ * Renames an existing rundown
+ * @throws if the provided id does not exist
+ */
+export async function renameRundown(id: string, title: string) {
+  const titleError = validateRundownTitle(title);
+  if (titleError) throw new InvalidRundownTitleError(titleError);
+  title = title.trim();
+
+  const { rundown, commit } = createTransaction({ rundownId: id, mutableRundown: true });
+
+  if (rundown.title === title) {
+    return getDataProvider().getProjectRundowns();
+  }
+
+  rundown.title = title;
+
+  // a title has no bearing on the schedule, there is nothing to process
+  const { revision } = await commit(false);
+  notifyChange(RefetchKey.Rundown, revision, id);
+  notifyChange(RefetchKey.ProjectRundowns);
+
+  return getDataProvider().getProjectRundowns();
+}
+
+/**
+ * Duplicates an existing rundown without making it the loaded one
+ * @throws if the provided id does not exist
+ */
+export async function duplicateExistingRundown(id: string) {
+  const dataProvider = getDataProvider();
+  const rundown = getStoredRundown(id);
+
+  const duplicatedRundown: Rundown = cloneRundown(rundown);
+  duplicatedRundown.id = generateId();
+  duplicatedRundown.title = getDuplicatedRundownTitle(rundown.title);
+  duplicatedRundown.revision = 0;
+
+  await dataProvider.setRundown(duplicatedRundown.id, duplicatedRundown);
+
+  notifyChange(RefetchKey.ProjectRundowns);
+
+  return dataProvider.getProjectRundowns();
+}
+
+/**
+ * Validates an imported rundown against the resulting custom fields, then commits those custom
+ * fields. The rundown is validated before the custom-field mutation, so a payload that fails
+ * validation cannot leave a partial custom-field write behind.
+ * @throws if the rundown or custom fields fail validation
+ */
+async function parseImportAndCommitCustomFields(
+  source: Readonly<Rundown>,
+  incomingCustomFields: CustomFields,
+): Promise<Rundown> {
+  const dataProvider = getDataProvider();
+  const parsedCustomFields = parseCustomFields({ customFields: incomingCustomFields });
+  const mergedCustomFields = { ...dataProvider.getCustomFields(), ...parsedCustomFields };
+  const parsed = parseRundown(source, mergedCustomFields);
+  await mergeCustomFields(parsedCustomFields);
+  return parsed;
+}
+
+/**
+ * Applies an imported rundown onto an existing rundown, keeping the existing identity while
+ * taking structure and order from the incoming data.
+ * - 'override' replaces all content with the incoming data
+ * - 'merge' updates matched entries with only the fields the spreadsheet provided, keeping the rest
+ *   (e.g. automations) from the existing entry
+ *
+ * When targeting the loaded rundown this is treated as a change, not a switch, so playback is
+ * maintained when the playing event survives.
+ * @throws if the target rundown does not exist
+ */
+export async function applyImportToRundown(
+  strategy: RundownImportMergeStrategy,
+  targetRundownId: string,
+  incomingRundown: Rundown,
+  incomingCustomFields: CustomFields,
+  providedFields: ImportedFields,
+): Promise<ProjectRundowns> {
+  const dataProvider = getDataProvider();
+  // throws if the rundown was deleted between preview and apply
+  const existing = getStoredRundown(targetRundownId);
+
+  const source =
+    strategy === 'merge'
+      ? mergeRundownPreservingFields(incomingRundown, existing, providedFields)
+      : { ...incomingRundown, id: existing.id, title: existing.title };
+  const parsed = await parseImportAndCommitCustomFields(source, incomingCustomFields);
+  await replaceRundown(targetRundownId, parsed);
+
+  return dataProvider.getProjectRundowns();
+}
+
+/**
+ * Creates a new rundown from an imported rundown and loads it,
+ * so the user immediately sees the imported data.
+ * Loading a rundown stops playback (as with any rundown switch).
+ */
+export async function createRundownFromImport(
+  incomingRundown: Rundown,
+  incomingCustomFields: CustomFields,
+): Promise<ProjectRundowns> {
+  const dataProvider = getDataProvider();
+
+  // assign a fresh id so we never collide with an existing rundown
+  const parsed = await parseImportAndCommitCustomFields({ ...incomingRundown, id: generateId() }, incomingCustomFields);
+  parsed.revision = 0;
+
+  // initRundown persists the new rundown, makes it the loaded rundown and notifies clients
+  await initRundown(parsed, dataProvider.getCustomFields(), true);
+
+  return dataProvider.getProjectRundowns();
+}
+
+/**
+ * Deletes a rundown
+ * @throws if attempting to delete the loaded rundown or the last rundown in the project
+ */
+export async function deleteRundown(id: string) {
+  if (isCurrentRundown(id)) {
+    throw new RundownDeleteConflictError('Cannot delete loaded rundown');
+  }
+
+  const dataProvider = getDataProvider();
+  if (Object.keys(dataProvider.getProjectRundowns()).length <= 1) {
+    throw new RundownDeleteConflictError('Cannot delete the last rundown');
+  }
+
+  // throws if the rundown does not exist
+  getStoredRundown(id);
+
+  const projectRundowns = await dataProvider.deleteRundown(id);
+
+  notifyChange(RefetchKey.ProjectRundowns);
+
+  return projectRundowns;
+}

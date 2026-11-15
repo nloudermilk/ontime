@@ -1,0 +1,13 @@
+.delayInput {
+  display: flex;
+  gap: $element-spacing;
+  align-items: center;
+}
+
+.inputField {
+  text-align: center;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+  max-width: 7em;
+  color: $ontime-delay-text;
+}

@@ -1,0 +1,176 @@
+import { HTMLAttributes, PropsWithChildren, ReactNode } from 'react';
+
+import { cx } from '../../../common/utils/styleUtils';
+
+import style from './PanelUtils.module.scss';
+
+export function Header({ children }: { children: ReactNode }) {
+  return <h2 className={style.header}>{children}</h2>;
+}
+
+export function SubHeader({ children }: { children: ReactNode }) {
+  return <h3 className={style.subheader}>{children}</h3>;
+}
+
+export function Title({ children }: { children: ReactNode }) {
+  return <h4 className={style.title}>{children}</h4>;
+}
+
+type AllowedTags = 'div' | 'form';
+type SectionProps<C extends AllowedTags> = {
+  as?: C;
+  children: ReactNode;
+} & React.JSX.IntrinsicElements[C];
+
+export function Section<C extends AllowedTags = 'div'>({ as, className, children, ...props }: SectionProps<C>) {
+  const Element = as ?? 'div';
+  return (
+    <Element className={cx([style.section, className])} {...(props as HTMLAttributes<HTMLElement>)}>
+      {children}
+    </Element>
+  );
+}
+
+export function Indent<C extends AllowedTags = 'div'>({ as, className, children, ...props }: SectionProps<C>) {
+  const Element = as ?? 'div';
+  return (
+    <Element className={cx([style.indent, className])} {...(props as HTMLAttributes<HTMLElement>)}>
+      {children}
+    </Element>
+  );
+}
+
+export function Paragraph({ children }: { children: ReactNode }) {
+  return <p className={style.paragraph}>{children}</p>;
+}
+
+export function Card({ children, className, ...props }: { children: ReactNode } & React.JSX.IntrinsicElements['div']) {
+  return (
+    <div className={cx([style.card, className])} {...props}>
+      {children}
+    </div>
+  );
+}
+
+export function Table({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <div className={style.pad}>
+      <table className={cx([style.table, className])}>{children}</table>
+    </div>
+  );
+}
+
+export interface EmptyStateProps {
+  title: string;
+  description?: ReactNode;
+  action?: ReactNode;
+}
+
+export function EmptyState({ title, description, action }: EmptyStateProps) {
+  return (
+    <div className={style.emptyState}>
+      <div className={style.emptyMessage}>
+        <div className={style.emptyTitle}>{title}</div>
+        {description && <div className={style.emptyBody}>{description}</div>}
+        {action && <div className={style.emptyAction}>{action}</div>}
+      </div>
+    </div>
+  );
+}
+
+export function TableEmpty(props: EmptyStateProps) {
+  return (
+    <tr>
+      <td colSpan={99}>
+        <EmptyState {...props} />
+      </td>
+    </tr>
+  );
+}
+
+export function ListGroup({ className, children }: { className?: string; children: ReactNode }) {
+  return <ul className={cx([style.listGroup, className])}>{children}</ul>;
+}
+
+export function ListItem({ children, interactive = false }: { children: ReactNode; interactive?: boolean }) {
+  return <li className={cx([style.listItem, interactive && style.interactive])}>{children}</li>;
+}
+
+export function Field({
+  title,
+  description,
+  error,
+  descriptionTone = 'default',
+}: {
+  title: ReactNode;
+  description: ReactNode;
+  error?: string;
+  descriptionTone?: 'default' | 'warning';
+}) {
+  return (
+    <div className={style.fieldTitle}>
+      <div className={style.fieldHeading}>{title}</div>
+      {error && <Error>{error}</Error>}
+      {!error && description && <Description tone={descriptionTone}>{description}</Description>}
+    </div>
+  );
+}
+
+export function Description({ children, tone = 'default' }: { children: ReactNode; tone?: 'default' | 'warning' }) {
+  return <div className={cx([style.fieldDescription, tone === 'warning' && style.warningText])}>{children}</div>;
+}
+
+export function Highlight({ children }: { children: ReactNode }) {
+  return <code className={style.highlight}>{children}</code>;
+}
+
+export function BlockQuote({ children }: { children: ReactNode }) {
+  return <blockquote className={style.blockquote}>{children}</blockquote>;
+}
+
+export function Error({ children, className }: PropsWithChildren & React.JSX.IntrinsicElements['div']) {
+  return <div className={cx([style.fieldError, className])}>{children}</div>;
+}
+
+export function Divider() {
+  return <hr className={style.divider} />;
+}
+
+export function Loader({ isLoading }: { isLoading: boolean }) {
+  if (!isLoading) {
+    return null;
+  }
+  return (
+    <div className={style.overlay}>
+      <div className={style.loader} />
+    </div>
+  );
+}
+
+type AllowedInlineTags = 'div' | 'td';
+type InlineProps<C extends AllowedInlineTags> = {
+  as?: C;
+  relation?: 'inner' | 'component' | 'section';
+  align?: 'start' | 'end' | 'apart';
+  wrap?: 'wrap' | 'nowrap';
+} & Omit<React.JSX.IntrinsicElements[C], 'align'>;
+
+export function InlineElements<C extends AllowedInlineTags = 'div'>({
+  children,
+  as,
+  relation = 'component',
+  align = 'start',
+  wrap = 'nowrap',
+  className,
+  ...elementProps
+}: PropsWithChildren<InlineProps<C>>) {
+  const Element = as ?? 'div';
+  return (
+    <Element
+      {...(elementProps as HTMLAttributes<HTMLElement>)}
+      className={cx([style.inlineElements, style[relation], style[align], style[wrap], className])}
+    >
+      {children}
+    </Element>
+  );
+}

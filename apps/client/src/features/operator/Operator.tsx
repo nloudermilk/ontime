@@ -1,0 +1,266 @@
+import { OntimeView, isOntimeEvent, isOntimeGroup } from 'ontime-types';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import EmptyFill from '../../common/components/state/EmptyFill';
+import EmptyPage from '../../common/components/state/EmptyPage';
+import ViewParamsEditor from '../../common/components/view-params-editor/ViewParamsEditor';
+import useFollowComponent from '../../common/hooks/useFollowComponent';
+import { useSelectedEventId } from '../../common/hooks/useSocket';
+import { useWindowTitle } from '../../common/hooks/useWindowTitle';
+import { cx } from '../../common/utils/styleUtils';
+import { throttle } from '../../common/utils/throttle';
+import { getDefaultFormat } from '../../common/utils/time';
+import { isTouchDevice } from '../../externals';
+import { useTranslation } from '../../translation/TranslationProvider';
+import Loader from '../../views/common/loader/Loader';
+import CustomFieldEditModal from './custom-field-edit-modal/CustomFieldEditModal';
+import FollowButton from './follow-button/FollowButton';
+import OperatorEvent from './operator-event/OperatorEvent';
+import OperatorGroup from './operator-group/OperatorGroup';
+import { getOperatorOptions, useOperatorOptions } from './operator.options';
+import type { EditEvent } from './operator.types';
+import { getEventData } from './operator.utils';
+import StatusBar from './status-bar/StatusBar';
+import { OperatorData, useOperatorData } from './useOperatorData';
+
+import style from './Operator.module.scss';
+
+/** Keeps the running event clear of the list edge when no group header is pinned above it */
+const edgeOffset = 50;
+/** How far the running event may drift from where we placed it before we stop following */
+const followTolerance = 50;
+
+export default function OperatorLoader() {
+  const { data, status } = useOperatorData();
+  const { getLocalizedString } = useTranslation();
+
+  useWindowTitle('Operator');
+
+  if (status === 'pending') {
+    return <Loader />;
+  }
+
+  if (status === 'error') {
+    return <EmptyPage variant='error' text={getLocalizedString('common.data_error')} />;
+  }
+
+  return <Operator {...data} />;
+}
+
+function Operator({ rundown, rundownMetadata, customFields, settings }: OperatorData) {
+  const selectedEventId = useSelectedEventId();
+  const { getLocalizedString } = useTranslation();
+  const { subscribe, mainSource, secondarySource, shouldEdit, hidePast, showStart } = useOperatorOptions();
+
+  const [showEditPrompt, setShowEditPrompt] = useState(false);
+  const [editEvent, setEditEvent] = useState<EditEvent | null>(null);
+
+  const [lockAutoScroll, setLockAutoScroll] = useState(false);
+  const selectedRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickyHeaderRef = useRef<HTMLDivElement | null>(null);
+
+  // The header height varies with the viewport, so measure it at scroll time.
+  const getTopOffset = useCallback(() => {
+    const header = stickyHeaderRef.current;
+    // Sit right under the pinned header, so it covers the previous event instead of half of it.
+    return header ? header.offsetHeight + 2 : edgeOffset;
+  }, []);
+
+  const scrollToComponent = useFollowComponent({
+    followRef: selectedRef,
+    scrollRef,
+    doFollow: !lockAutoScroll,
+    getTopOffset,
+    followTrigger: selectedEventId,
+  });
+
+  const timeoutId = useRef<NodeJS.Timeout | null>(null);
+
+  // reset scroll if nothing is selected
+  useEffect(() => {
+    if (!selectedEventId) {
+      if (!lockAutoScroll) {
+        scrollRef.current?.scrollTo(0, 0);
+      }
+    }
+  }, [selectedEventId, lockAutoScroll, scrollRef]);
+
+  const handleOffset = () => {
+    if (selectedEventId) {
+      scrollToComponent();
+    }
+    setLockAutoScroll(false);
+  };
+
+  // prevent considering automated scrolls as user scrolls
+  const handleUserScroll = () => {
+    if (!selectedRef.current || !scrollRef.current) {
+      return;
+    }
+
+    const selectedRect = selectedRef.current.getBoundingClientRect();
+    const scrollerRect = scrollRef.current.getBoundingClientRect();
+    // Measure the drift from where an automated scroll would place the event.
+    const distanceFromTop = selectedRect.top - scrollerRect.top - getTopOffset();
+    const hasScrolledOutOfThreshold = distanceFromTop < -8 || distanceFromTop > followTolerance;
+    setLockAutoScroll(hasScrolledOutOfThreshold);
+  };
+  const throttledHandleScroll = throttle(handleUserScroll, 1000);
+
+  const handleScroll = () => {
+    if (timeoutId.current) {
+      clearTimeout(timeoutId.current);
+    }
+    timeoutId.current = setTimeout(() => {
+      setShowEditPrompt(false);
+    }, 700);
+
+    setShowEditPrompt(true);
+
+    throttledHandleScroll();
+  };
+
+  const handleEdit = useCallback((event: EditEvent) => {
+    setEditEvent({ ...event });
+  }, []);
+
+  // gather option data
+  const defaultFormat = getDefaultFormat(settings?.timeFormat);
+  const operatorOptions = useMemo(() => getOperatorOptions(customFields, defaultFormat), [customFields, defaultFormat]);
+
+  const canEdit = shouldEdit && subscribe.length;
+  const hasEvents = rundown.order.length > 0;
+
+  return (
+    <div className={style.operatorContainer} data-testid='operator-view'>
+      <ViewParamsEditor target={OntimeView.Operator} viewOptions={operatorOptions} />
+      {editEvent && <CustomFieldEditModal event={editEvent} onClose={() => setEditEvent(null)} />}
+
+      <StatusBar />
+
+      {canEdit && (
+        <div className={cx([style.editPrompt, showEditPrompt && style.show])}>
+          {isTouchDevice ? 'Press and hold to edit user field' : 'Right click to edit user field'}
+        </div>
+      )}
+
+      {!hasEvents ? (
+        <EmptyFill text={getLocalizedString('common.no_data')} />
+      ) : (
+        <div className={style.operatorEvents} onWheel={handleScroll} onTouchMove={handleScroll} ref={scrollRef}>
+          {rundown.order.map((entryId) => {
+            const entry = rundown.entries[entryId];
+            if (isOntimeEvent(entry)) {
+              const { isPast, isLinkedToLoaded, isLoaded, totalGap } = rundownMetadata[entryId];
+              // hide past events (if setting) and skipped events
+              if ((hidePast && isPast) || entry.skip) {
+                return null;
+              }
+
+              const { mainField, secondaryField, subscribedData } = getEventData(
+                entry,
+                mainSource,
+                secondarySource,
+                subscribe,
+                customFields,
+              );
+
+              return (
+                <OperatorEvent
+                  key={entry.id}
+                  id={entry.id}
+                  colour={entry.colour}
+                  cue={entry.cue}
+                  main={mainField}
+                  secondary={secondaryField}
+                  timeStart={entry.timeStart}
+                  duration={entry.duration}
+                  delay={entry.delay}
+                  dayOffset={entry.dayOffset}
+                  isLinkedToLoaded={isLinkedToLoaded}
+                  isSelected={isLoaded}
+                  isPast={isPast}
+                  selectedRef={isLoaded ? selectedRef : undefined}
+                  showStart={showStart}
+                  subscribed={subscribedData}
+                  totalGap={totalGap}
+                  onLongPress={canEdit ? handleEdit : () => undefined}
+                />
+              );
+            }
+
+            if (isOntimeGroup(entry)) {
+              const { isPast } = rundownMetadata[entry.id];
+
+              const isCurrentParent = selectedEventId ? rundownMetadata[selectedEventId]?.groupId === entry.id : false;
+
+              if (hidePast && isPast && !isCurrentParent) {
+                return null;
+              }
+
+              return (
+                <div className={style.groupSection} key={entry.id}>
+                  <OperatorGroup
+                    ref={isCurrentParent ? stickyHeaderRef : undefined}
+                    title={entry.title}
+                    colour={entry.colour}
+                    count={entry.entries.length}
+                    duration={entry.duration}
+                  />
+                  {entry.entries.map((nestedEntryId) => {
+                    const nestedEntry = rundown.entries[nestedEntryId];
+                    if (!isOntimeEvent(nestedEntry)) {
+                      return null;
+                    }
+
+                    const { isPast, isLoaded, isLinkedToLoaded, totalGap } = rundownMetadata[nestedEntryId];
+
+                    // hide past events (if setting) and skipped events
+                    if ((hidePast && isPast) || nestedEntry.skip) {
+                      return null;
+                    }
+
+                    const { mainField, secondaryField, subscribedData } = getEventData(
+                      nestedEntry,
+                      mainSource,
+                      secondarySource,
+                      subscribe,
+                      customFields,
+                    );
+
+                    return (
+                      <OperatorEvent
+                        key={nestedEntry.id}
+                        id={nestedEntry.id}
+                        colour={nestedEntry.colour}
+                        cue={nestedEntry.cue}
+                        main={mainField}
+                        secondary={secondaryField}
+                        timeStart={nestedEntry.timeStart}
+                        duration={nestedEntry.duration}
+                        delay={nestedEntry.delay}
+                        dayOffset={nestedEntry.dayOffset}
+                        isLinkedToLoaded={isLinkedToLoaded}
+                        isSelected={isLoaded}
+                        isPast={isPast}
+                        groupColour={entry.colour}
+                        selectedRef={isLoaded ? selectedRef : undefined}
+                        showStart={showStart}
+                        subscribed={subscribedData}
+                        totalGap={totalGap}
+                        onLongPress={canEdit ? handleEdit : () => undefined}
+                      />
+                    );
+                  })}
+                </div>
+              );
+            }
+            return null;
+          })}
+        </div>
+      )}
+      <FollowButton isVisible={lockAutoScroll} onClickHandler={handleOffset} />
+    </div>
+  );
+}

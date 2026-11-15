@@ -1,0 +1,43 @@
+.overview {
+  grid-area: overview;
+  font-size: $inner-section-text-size;
+  display: flex;
+  overflow: hidden;
+}
+
+.isOffline {
+  .info {
+    opacity: 0.5;
+    filter: saturate(0.5);
+  }
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.info {
+  padding-left: 1rem;
+  transition:
+    opacity $transition-time-feedback,
+    filter $transition-time-feedback;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: max-content;
+  height: 100%;
+}
+
+.infoScroll {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}

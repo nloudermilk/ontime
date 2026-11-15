@@ -1,0 +1,31 @@
+# Ignore formatter config files
+.oxfmt*
+
+# Ignore install stuff
+**/yarn.lock
+**/yarn-error.log
+
+# Ignore test files
+**/__tests__/**
+**/**.test.js
+
+# Ignore git and cache folders
+.git
+.gitignore
+.cache
+
+# Ignore build folders
+node_modules
+**/node_modules
+
+# Keep build diagnostics outside the runtime image
+apps/client/build/**/*.map
+
+# Only the Docker server bundle is used by the container
+apps/server/dist/*
+!apps/server/dist/docker.cjs
+!apps/server/dist/docker.cjs.LEGAL.txt
+
+# Ignore default volumes created by running docker compose up
+ontime-db
+ontime-styles

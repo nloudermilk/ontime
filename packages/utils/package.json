@@ -1,0 +1,23 @@
+{
+  "name": "ontime-utils",
+  "type": "module",
+  "exports": "./index.ts",
+  "private": true,
+  "description": "shared logic for ontime",
+  "scripts": {
+    "lint": "oxlint --quiet --type-aware",
+    "test": "vitest watch",
+    "test:pipeline": "vitest run"
+  },
+  "dependencies": {
+    "deepmerge-ts": "^7.1.5",
+    "nanoid": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "ontime-types": "workspace:*",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "sideEffects": false
+}

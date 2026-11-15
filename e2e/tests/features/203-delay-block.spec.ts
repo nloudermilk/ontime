@@ -1,0 +1,112 @@
+import { expect, test } from '../fixtures/override';
+
+test('cuesheet keyboard navigation skips hidden delays', async ({ context }) => {
+  const editor = await context.newPage();
+  const cuesheet = await context.newPage();
+  await Promise.all([editor.goto('editor'), cuesheet.goto('cuesheet')]);
+
+  await editor.getByRole('button', { name: 'Edit' }).click();
+  await editor.getByRole('button', { name: 'Rundown menu' }).click();
+  await editor.getByRole('menuitem', { name: 'Clear all' }).click();
+  await editor.getByRole('button', { name: 'Delete all' }).click();
+  await editor.getByRole('button', { name: 'Create Event' }).click();
+  await editor.getByRole('button', { name: 'Event', exact: true }).nth(1).click();
+  await editor.getByRole('button', { name: 'Delay' }).nth(1).click();
+
+  await expect(cuesheet.getByTestId('cuesheet-delay-hidden')).toBeAttached();
+  const titles = cuesheet.getByTestId('cuesheet-cell-title');
+  await titles.first().focus();
+  await cuesheet.keyboard.press('ArrowDown');
+  await expect(titles.nth(1)).toBeFocused();
+  await cuesheet.keyboard.press('ArrowUp');
+  await expect(titles.first()).toBeFocused();
+});
+
+test('delays add time to events', async ({ page }) => {
+  await page.goto('editor');
+
+  // delete all events and add a new one
+  await page.getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('button', { name: 'Rundown menu' }).click();
+  await page.getByRole('menuitem', { name: 'Clear all' }).click();
+  await page.getByRole('button', { name: 'Delete all' }).click();
+  await page.getByRole('button', { name: 'Create event' }).click();
+
+  // add data to new event
+  await page.getByTestId('rundown').getByPlaceholder('Start').click();
+  await page.getByTestId('rundown').getByPlaceholder('Start').fill('10m');
+  await page.getByTestId('rundown').getByPlaceholder('Start').press('Enter');
+  await page.getByTestId('rundown').getByPlaceholder('Duration').click();
+  await page.getByTestId('rundown').getByPlaceholder('Duration').fill('20m');
+  await page.getByTestId('rundown').getByPlaceholder('Duration').press('Enter');
+
+  // add delay
+  await page.getByRole('button', { name: 'Delay' }).nth(0).click();
+
+  // fill positive delay
+  await page.getByTestId('delay-input').click();
+  await page.getByTestId('delay-input').fill('2m');
+  await page.getByTestId('delay-input').press('Enter');
+  await expect(page.getByText('New start 00:12')).toBeVisible();
+
+  // make negative delay
+  await page.getByText('Subtract time').click();
+  await expect(page.getByText('New start 00:08')).toBeVisible();
+
+  // apply delay
+  await page.getByRole('button', { name: 'Make permanent' }).click();
+  await expect(page.getByTestId('rundown').getByTestId('time-input-timeStart')).toHaveValue('00:08:00');
+
+  // add new delay
+  await page.getByTestId('rundown').getByPlaceholder('Start').click();
+  await page.getByRole('button', { name: 'Delay' }).nth(0).click();
+  await page.getByTestId('delay-input').click();
+  await page.getByTestId('delay-input').fill('10m');
+  await page.getByTestId('delay-input').press('Enter');
+  await expect(page.getByText('New start 00:18')).toBeVisible();
+
+  // cancel delay
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByTestId('rundown').getByTestId('time-input-timeStart')).toHaveValue('00:08:00');
+  await expect(page.getByText('New start 00:18')).toHaveCount(0);
+});
+
+test('delays are shown in the editor, cuesheet and backstage', async ({ page }) => {
+  await page.goto('editor');
+
+  // add a test event
+  await page.getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('button', { name: 'Rundown menu' }).click();
+  await page.getByRole('menuitem', { name: 'Clear all' }).click();
+  await page.getByRole('button', { name: 'Delete all' }).click();
+  await page.getByRole('button', { name: 'Create Event' }).click();
+
+  await page.getByTestId('time-input-timeStart').click();
+  await page.getByTestId('rundown').getByTestId('time-input-timeStart').click();
+  await page.getByTestId('rundown').getByTestId('time-input-timeStart').fill('10');
+  await page.getByTestId('rundown').getByTestId('time-input-timeStart').press('Enter');
+  await page.getByTestId('rundown').getByTestId('time-input-duration').click();
+  await page.getByTestId('rundown').getByTestId('time-input-duration').fill('10');
+  await page.getByTestId('rundown').getByTestId('time-input-duration').press('Enter');
+  await page.getByTestId('entry__title').click();
+  await page.getByTestId('entry__title').fill('test');
+  await page.getByTestId('entry__title').press('Enter');
+  await expect(page.getByTestId('entry-1').locator('#entry-status')).toHaveAttribute('data-timerType', 'count-down');
+
+  // add a delay
+  await page.getByRole('button', { name: 'Delay' }).nth(0).click();
+  await page.getByTestId('delay-input').click();
+  await page.getByTestId('delay-input').fill('1');
+  await page.getByTestId('delay-input').press('Enter');
+
+  // delay is shown in the editor
+  await expect(page.getByText('New start 00:11')).toBeVisible();
+
+  // delay is shown in the cuesheet
+  await page.goto('cuesheet');
+  await expect(page.getByRole('cell', { name: 'Delayed by 1 min' })).toBeVisible();
+
+  // delay is shown in the backstage view
+  await page.goto('backstage');
+  await expect(page.getByText('00:11→00:21')).toBeVisible();
+});

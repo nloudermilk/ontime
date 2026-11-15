@@ -1,0 +1,85 @@
+.container {
+  width: min(30vw, 300px);
+  flex: 0 0 min(30vw, 300px);
+  min-width: min(30vw, 300px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+}
+
+.tabs,
+ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.tabs {
+  display: flex;
+  flex-direction: column;
+}
+
+.primary,
+.secondary {
+  padding: 0.25rem 1rem;
+  margin-right: 1rem;
+  border-radius: 2px;
+
+  &:focus-visible {
+    background-color: $gray-1000;
+    outline: 2px solid $blue-500;
+    outline-offset: -2px;
+  }
+
+  &:hover {
+    background-color: $gray-1000;
+    cursor: pointer;
+  }
+}
+
+.primary {
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-left: 3px solid transparent;
+
+  &.groupActive {
+    color: $blue-400;
+    font-weight: 600;
+  }
+
+  &.active {
+    color: $ui-white;
+    border-left-color: $blue-400;
+    background-color: $bg-active;
+    font-weight: 600;
+  }
+
+  &.highlight {
+    color: $red-400;
+
+    &::before {
+      content: '';
+      width: 0.5em;
+      height: 0.5em;
+      border-radius: 99px;
+      background-color: $red-400;
+    }
+  }
+}
+
+.secondary {
+  margin-left: 1rem;
+  color: $secondary-text-gray;
+  border-left: 1px solid $white-10;
+  font-size: $inner-section-text-size;
+
+  &.active {
+    color: $ui-white;
+    border-left-color: $blue-400;
+    background-color: $bg-active;
+    font-weight: 600;
+  }
+}

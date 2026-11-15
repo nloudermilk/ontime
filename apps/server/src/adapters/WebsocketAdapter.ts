@@ -1,0 +1,276 @@
+/**
+ * DESIGN BY CONTRACT
+ * ===================
+ * All websocket calls are expected to follow the defined format,
+ * otherwise they will be ignored by Ontime server
+ *
+ * Messages should be in JSON format with two top level objects
+ * {
+ *   tag: ...
+ *   payload: ...
+ * }
+ *
+ * Type: describes the action to be performed as enumerated in the API design
+ * Payload: adds necessary payload for the request to be completed
+ */
+
+import type { Server } from 'http';
+
+import {
+  Client,
+  LogOrigin,
+  MaybeNumber,
+  MessageTag,
+  ProjectStartup,
+  RefetchKey,
+  WsPacketToClient,
+  WsPacketToServer,
+} from 'ontime-types';
+import { generateId, getErrorMessage } from 'ontime-utils';
+import { WebSocket, WebSocketServer } from 'ws';
+
+import * as logger from '../api-data/logs/logs.service.js';
+import { dispatchFromAdapter } from '../api-integration/integration.controller.js';
+import { timeOfDayNow } from '../lib/time-core/timeCore.js';
+import { authenticateSocket } from '../middleware/authenticate.js';
+import { eventStore } from '../stores/EventStore.js';
+import getRandomName from '../utils/getRandomName.js';
+import type { IAdapter } from './IAdapter.js';
+
+type ClientId = string;
+let instance: SocketServer | null = null;
+
+class SocketServer implements IAdapter {
+  private readonly MAX_PAYLOAD = 1024 * 256; // 256Kb
+
+  private wss: WebSocketServer | null;
+  private readonly clients: Map<ClientId, Client>;
+  private lastConnection: Date | null = null;
+  /** sent once, to the first editor which connects */
+  private welcome: ProjectStartup | null = null;
+
+  constructor() {
+    if (instance) {
+      throw new Error('There can be only one');
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- this logic is used to ensure singleton
+    instance = this;
+    this.clients = new Map<ClientId, Client>();
+    this.wss = null;
+  }
+
+  init(server: Server, welcome: ProjectStartup | null, prefix?: string) {
+    this.welcome = welcome;
+    this.wss = new WebSocketServer({ path: `${prefix}/ws`, server, maxPayload: this.MAX_PAYLOAD });
+
+    this.wss.on('connection', (ws, req) => {
+      // Rejected sockets can emit an error while their close handshake is in progress.
+      ws.on('error', console.error);
+
+      let isAuthenticated = false;
+      authenticateSocket(ws, req, (error) => {
+        if (error) {
+          ws.close(1008, 'Unauthorized');
+          return;
+        }
+        isAuthenticated = true;
+      });
+
+      if (!isAuthenticated) {
+        return;
+      }
+
+      const clientId = generateId();
+      const clientName = getRandomName();
+      function sendPacket<T extends MessageTag>(
+        tag: T,
+        payload: Pick<WsPacketToClient & { tag: T }, 'payload'>['payload'],
+      ) {
+        ws.send(JSON.stringify({ tag, payload }));
+      }
+
+      this.clients.set(clientId, {
+        type: 'unknown',
+        identify: false,
+        name: clientName,
+        origin: '',
+        path: '',
+      });
+
+      this.lastConnection = new Date();
+      logger.info(LogOrigin.Client, 'Client connected', { client: clientName, clients: this.clients.size });
+
+      sendPacket(MessageTag.ClientInit, { clientId, clientName });
+
+      this.sendClientList();
+
+      // send store payload on connect
+      sendPacket(MessageTag.RuntimeData, eventStore.poll());
+
+      ws.on('close', () => {
+        this.clients.delete(clientId);
+        logger.info(LogOrigin.Client, 'Client disconnected', { client: clientName, clients: this.clients.size });
+        this.sendClientList();
+      });
+
+      ws.on('message', async (data) => {
+        try {
+          const message = JSON.parse(data.toString()) as WsPacketToServer;
+          const { tag, payload } = message;
+
+          switch (tag) {
+            case MessageTag.Ping: {
+              const pong: WsPacketToClient = { tag: MessageTag.Pong, payload, clock: timeOfDayNow() };
+              ws.send(JSON.stringify(pong));
+              break;
+            }
+            case MessageTag.ClientSet: {
+              const previousData = this.getOrCreateClient(clientId);
+              const updatedClient = { ...previousData, ...payload };
+              this.clients.set(clientId, updatedClient);
+              if (this.welcome && updatedClient.path?.toLowerCase().includes('editor')) {
+                sendPacket(MessageTag.Dialog, { dialog: 'welcome', ...this.welcome });
+                this.welcome = null;
+              }
+              this.sendClientList();
+              break;
+            }
+            case MessageTag.ClientSetPath: {
+              const previousData = this.getOrCreateClient(clientId);
+              previousData.path = payload;
+              this.clients.set(clientId, previousData);
+              if (this.welcome && payload.toLowerCase().includes('editor')) {
+                sendPacket(MessageTag.Dialog, { dialog: 'welcome', ...this.welcome });
+                this.welcome = null;
+              }
+              this.sendClientList();
+              break;
+            }
+            default: {
+              tag satisfies never;
+              // Protocol specific stuff handled above
+              try {
+                const reply = await dispatchFromAdapter(tag, payload, 'ws', this.clients.get(clientId)?.name);
+                if (reply) {
+                  ws.send(
+                    JSON.stringify({
+                      tag,
+                      payload: reply.payload,
+                    }),
+                  );
+                }
+              } catch (error) {
+                logger.error(LogOrigin.Api, 'WebSocket message failed', { tag, error: getErrorMessage(error) });
+              }
+              break;
+            }
+          }
+        } catch (_) {
+          // we ignore unknown
+        }
+      });
+    });
+  }
+
+  getStats() {
+    return {
+      connectedClients: this.clients.size,
+      lastConnection: this.lastConnection,
+    };
+  }
+
+  private getOrCreateClient(clientId: ClientId): Client {
+    if (!this.clients.has(clientId)) {
+      this.clients.set(clientId, {
+        type: 'unknown',
+        identify: false,
+        name: getRandomName(),
+        origin: '',
+        path: '',
+      });
+    }
+    return this.clients.get(clientId) as Client;
+  }
+
+  private sendClientList(): void {
+    const payload = Object.fromEntries(this.clients.entries());
+    this.sendAsJson(MessageTag.ClientList, payload);
+  }
+
+  public getClientList(): ClientId[] {
+    return Array.from(this.clients.keys());
+  }
+
+  public renameClient(target: ClientId, name: string) {
+    const previousData = this.clients.get(target);
+    if (!previousData) {
+      throw new Error(`Client "${target}" not found`);
+    }
+    logger.info(LogOrigin.Client, 'Client renamed', { from: previousData.name, to: name });
+    this.clients.set(target, { ...previousData, name });
+    this.sendAsJson(MessageTag.ClientRename, { name, target });
+    this.sendClientList();
+  }
+
+  public redirectClient(target: ClientId, path: string) {
+    const previousData = this.clients.get(target);
+    if (!previousData) {
+      throw new Error(`Client "${target}" not found`);
+    }
+    this.sendAsJson(MessageTag.ClientRedirect, { target, path });
+  }
+
+  public identifyClient(target: ClientId, identify: boolean) {
+    const previousData = this.clients.get(target);
+    if (!previousData) {
+      throw new Error(`Client "${target}" not found`);
+    }
+    this.clients.set(target, { ...previousData, identify });
+    this.sendClientList();
+  }
+
+  // message is any serializable value
+  public sendAsJson<T extends MessageTag>(tag: T, payload: Pick<WsPacketToClient & { tag: T }, 'payload'>['payload']) {
+    try {
+      const stringifiedMessage = JSON.stringify({ tag, payload });
+      this.wss?.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(stringifiedMessage);
+        }
+      });
+    } catch (_) {
+      /** We do not handle this error */
+    }
+  }
+
+  shutdown(): Promise<void> {
+    const wss = this.wss;
+    if (!wss) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      // Notify clients first so they can reconnect gracefully
+      for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
+          client.close(1001, 'Server shutting down');
+        }
+      }
+
+      wss.close(() => {
+        this.wss = null;
+        resolve();
+      });
+    });
+  }
+}
+
+export const socket = new SocketServer();
+
+/**
+ * Utility function to notify clients that the REST data is stale
+ */
+export function sendRefetch(target: RefetchKey, revision: MaybeNumber = null, rundownId?: string) {
+  socket.sendAsJson(MessageTag.Refetch, { target, revision, rundownId });
+}

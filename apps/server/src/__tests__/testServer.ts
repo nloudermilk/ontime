@@ -1,0 +1,58 @@
+import { MessageTag } from 'ontime-types';
+
+/**
+ * Starts a real Ontime server in-process, on a free port, against the test file's data folder
+ * Every call loads a fresh module graph, so starting again after stop() behaves like an app restart
+ */
+export async function startTestServer() {
+  process.env.PORT = '0';
+  vi.resetModules();
+
+  const server = await import('../server.js');
+  await server.initAssets();
+  const { serverPort } = await server.startServer();
+  const baseUrl = `http://localhost:${serverPort}`;
+  let stopped: Promise<void> | undefined;
+
+  return {
+    baseUrl,
+    /** shuts down as the app would with this exit code, 0 by default, safe to call more than once */
+    stop: (exitCode = 0) => (stopped ??= server.stopServices(exitCode)),
+    socketUrl: `ws://localhost:${serverPort}/ws`,
+    get: (path: string) => fetch(`${baseUrl}${path}`),
+    /** for requests which are not JSON, such as file uploads */
+    request: (path: string, init: RequestInit) => fetch(`${baseUrl}${path}`, init),
+    send: (method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown) =>
+      fetch(`${baseUrl}${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+  };
+}
+
+export type TestServer = Awaited<ReturnType<typeof startTestServer>>;
+
+/**
+ * Connects an editor, and resolves with the welcome dialog the server greets it with
+ * Resolves null without one, the server sends the client list after any welcome
+ */
+export async function editorWelcome(server: TestServer): Promise<unknown> {
+  const socket = new WebSocket(server.socketUrl);
+  onTestFinished(() => socket.close());
+  const welcome = new Promise((resolve) => {
+    socket.addEventListener('message', (event) => {
+      const { tag, payload } = JSON.parse(String(event.data));
+      if (tag === MessageTag.Dialog) resolve(payload);
+      // the list which follows the path change, any welcome came before it
+      const clients: { path?: string }[] = tag === MessageTag.ClientList ? Object.values(payload) : [];
+      if (clients.some((client) => client.path === '/editor')) resolve(null);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, { once: true });
+    socket.addEventListener('error', reject, { once: true });
+  });
+  socket.send(JSON.stringify({ tag: MessageTag.ClientSetPath, payload: '/editor' }));
+  return welcome;
+}

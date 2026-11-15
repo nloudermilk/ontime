@@ -1,0 +1,287 @@
+$inner-padding: 1rem;
+$card-padding: 2rem;
+
+.header {
+  font-size: 1.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid $white-10;
+  font-weight: 600;
+}
+
+.subheader {
+  font-size: 1.125rem;
+  padding-bottom: 0.5rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.title {
+  font-size: 1rem;
+  padding: 0 var(--panel-card-padding, #{$card-padding});
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: $gray-300;
+}
+
+.section,
+.indent {
+  font-size: calc(1rem - 1px);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  color: $ui-white;
+}
+
+// width is owned by the panel content column, which caps and centres itself.
+// sections must stay full width so top level cards line up with Panel.Header
+// and nested sections fill their card rather than shrinking to fit
+.section {
+  position: relative;
+  margin-top: 2rem;
+}
+
+.indent {
+  padding: 1rem;
+  background-color: $gray-1350;
+}
+
+.paragraph {
+  padding: 0.5rem 0;
+}
+
+.card {
+  --panel-card-padding: #{$card-padding};
+
+  position: relative;
+  padding: var(--panel-card-padding);
+  background-color: $white-3;
+  border: 1px solid $gray-1100;
+  border-radius: 3px;
+}
+
+.highlight {
+  font-size: calc(1rem - 2px);
+  color: $orange-500;
+  padding-inline: 0.25rem;
+}
+
+.blockquote {
+  padding-left: 0.5rem;
+  border-left: 2px solid $gray-100;
+  background-color: $white-3;
+}
+
+.error {
+  font-size: $inner-section-text-size;
+  display: block;
+  color: $error-red;
+}
+
+// tables scroll with the panel rather than owning a nested scroll area,
+// which keeps the sticky table head anchored to the panel viewport
+.pad {
+  padding: 0 var(--panel-card-padding, #{$card-padding});
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: calc(1rem - 2px);
+  text-align: left;
+  margin-bottom: 2rem;
+
+  thead {
+    position: sticky;
+    top: 0;
+    z-index: $zindex-floating;
+    background-color: $gray-1350;
+  }
+
+  th {
+    font-weight: 600;
+    color: $gray-300;
+    font-size: calc(1rem - 3px);
+    letter-spacing: 0.02em;
+    vertical-align: bottom;
+    white-space: nowrap;
+    text-transform: uppercase;
+  }
+
+  th,
+  td {
+    padding: 0.5rem;
+  }
+
+  tr:nth-child(even) {
+    background-color: $white-1;
+  }
+
+  // active rows use a panel-local class today; keep the treatment here so all
+  // settings tables share the same state without each panel owning its colours
+  tr[class*='current'] {
+    background-color: $bg-active;
+
+    > td:first-child {
+      box-shadow: inset 3px 0 $blue-400;
+      font-weight: 500;
+    }
+  }
+
+  // allow highlighting table elements
+  tr[data-warn='true'],
+  td[data-warn='true'] {
+    background-color: $orange-1300;
+  }
+}
+
+.listGroup {
+  padding: 0 var(--panel-card-padding, #{$card-padding});
+
+  > li:not(:last-child) {
+    border-bottom: 1px solid $white-10;
+  }
+}
+
+.listItem {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 0;
+
+  &.interactive {
+    margin-inline: calc(var(--panel-card-padding, #{$card-padding}) * -1);
+    padding: 0.75rem var(--panel-card-padding, #{$card-padding});
+    transition: background-color $transition-time-action;
+
+    &:hover,
+    &:focus-within {
+      background-color: $white-3;
+    }
+  }
+}
+
+.fieldTitle {
+  color: $ui-white;
+  font-size: 1rem;
+}
+
+.fieldHeading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.fieldDescription {
+  font-size: calc(1rem - 2px);
+  color: $gray-400;
+}
+
+.warningText {
+  color: $orange-500;
+}
+
+.fieldError {
+  font-size: calc(1rem - 2px);
+  color: $red-500;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid $white-10;
+  margin: 1rem calc(var(--panel-card-padding, #{$card-padding}) * -1);
+}
+
+.overlay {
+  position: absolute;
+  z-index: $zindex-backdrop;
+  inset: 0;
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-content: center;
+  background-color: $black-10;
+}
+
+.loader {
+  $loader-size: 4rem;
+  width: $loader-size;
+  height: $loader-size;
+  background: $blue-500;
+  display: inline-block;
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: animloader 1s ease-in infinite;
+}
+
+.emptyState {
+  padding: 3rem 1.5rem;
+  text-align: center;
+}
+
+.emptyMessage {
+  width: min(30rem, 100%);
+  margin-inline: auto;
+}
+
+.emptyTitle {
+  margin-bottom: 0.25rem;
+  color: rgba($gray-200, 0.72);
+  font-size: calc(1rem + 2px);
+  font-weight: 400;
+}
+
+.emptyBody {
+  color: rgba($gray-200, 0.55);
+  font-size: calc(1rem - 3px);
+  line-height: 1.5;
+}
+
+.emptyAction {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.inlineElements {
+  display: flex;
+  align-items: center;
+
+  &.inner {
+    gap: 0.5rem;
+  }
+  &.component {
+    gap: 1rem;
+  }
+  &.start {
+    justify-content: flex-start;
+  }
+  &.end {
+    justify-content: flex-end;
+  }
+  &.apart {
+    justify-content: space-between;
+  }
+
+  &.wrap {
+    flex-wrap: wrap;
+    row-gap: 0.5rem;
+  }
+}
+
+@keyframes animloader {
+  0% {
+    transform: scale(0);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}

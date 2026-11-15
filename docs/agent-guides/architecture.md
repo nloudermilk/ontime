@@ -1,0 +1,131 @@
+# Ontime architecture
+
+Use for module placement or cross-boundary changes.
+
+## Direction
+
+Dependencies point toward pure domain logic:
+
+```text
+HTTP request
+  -> validation / router or controller
+  -> service orchestration
+  -> pure domain utilities
+
+service orchestration
+  -> DAO / stores / adapters / external clients
+```
+
+Keep a layer only for clearer ownership, isolated side effects, or direct business-rule tests.
+
+## Reuse and ownership
+
+Before adding a module, helper, service, or interface, find the concept owner and inspect callers.
+
+1. Reuse when the contract already matches.
+2. Extend for the same concept when the contract stays coherent.
+3. Keep local when reuse needs flags, broad optional inputs, unrelated modes, or leaky terms.
+4. Generalise only after stable common behaviour appears across real callers.
+
+Do not duplicate canonical rules or distort an abstraction to force reuse. Small local duplication can beat coupling unrelated concepts.
+
+## Server
+
+### Model
+
+- Vertical slices: each `api-data/<resource>/` matches its route and holds its router, validation, service, DAO, utils, tests. Keep folder names aligned with routes.
+- Aggregates own data and invariants. Rundown owns entries, groups, custom fields; the project is the unit of persistence. Other slices (excel, sheets, report, custom-fields, MCP, integrations) go through the owner's service or DAO, never its state.
+- Functional core, imperative shell: pure utils and parsers decide; services orchestrate effects in visible order.
+- Adapters at the edge: `adapters/` and `api-integration/` translate inbound protocols; `automation/clients/` handle outbound ones.
+- Runtime is a clock-driven context in `services/runtime-service/`: state machine (`stores/runtimeState`), ticker (`tickingTimer`, no runtime knowledge), service shell (`runtime.service`). Only the runtime service writes runtime state. The service starts the ticker in `init()`, applies each tick to runtime state; its commands change runtime state directly, and its `broadcastResult` decorator is the only place that reschedules the next boundary. The runtime listens for data changes and reads rundown through its DAO.
+
+### Layout
+
+| Location                   | Holds                                      |
+| -------------------------- | ------------------------------------------ |
+| `api-data/<resource>/`     | One route slice; nothing else              |
+| `services/<name>-service/` | One service with its helpers and tests     |
+| `stores/`                  | Mutable runtime state                      |
+| `adapters/`                | Inbound protocol adapters                  |
+| `middleware/`              | Express middleware and error categories    |
+| `lib/`                     | Self-contained libraries (eg: `time-core`) |
+| `utils/`                   | Generic, domain-free helpers               |
+
+| File suffix                        | Role                                                             |
+| ---------------------------------- | ---------------------------------------------------------------- |
+| `.router.ts`, `.controller.ts`     | HTTP edge: map requests to service calls                         |
+| `.validation.ts`, `.middleware.ts` | Guard the boundary, next to the resource                         |
+| `.service.ts`                      | Shell: orchestrate persistence, broadcast, runtime notifications |
+| `.dao.ts`                          | Shell: persistence and cache                                     |
+| `.utils.ts`, `.parser.ts`          | Core: pure, inputs passed explicitly                             |
+| `.types.ts`                        | Local types                                                      |
+
+Name files `name.role.ts`. Keep tests in a sibling `__tests__/`.
+
+Known gaps, not precedent: `runtimeState` reads the clock and mutates a module singleton; some routers read from `DataProvider` directly; automations read the live store when a lifecycle event is delivered, not the state it carries.
+
+### Routers and controllers
+
+Routers declare paths and middleware. Controllers map validated HTTP input to typed service arguments, then results to responses.
+
+`/data` handlers throw instead of catching. Each slice declares its errors in `<resource>.errors.ts`, extending a category from `middleware/errors.ts`; the error builds its own message. `middleware/errorHandler.ts` maps categories only: `NotFoundError` 404, `ConflictError` 409, `InvalidInputError` 422, anything else 500, all as `{ message }`. The domain never sees HTTP statuses. Request shape stays with express-validator (422).
+
+Keep reusable calculations, domain decisions, transformations, persistence workflows, and integration coordination out of handlers. Simple reads may stay direct when a service would only pass through.
+
+### Services
+
+Services orchestrate use cases and side-effect boundaries. Make ordering and effects visible. Move substantial branching, calculation, comparison, parsing, and transformation to pure utilities.
+
+### Pure utilities
+
+Pass required state, config, and time explicitly. No I/O, stores/globals, logging, websocket publication, browser inspection, or caller-owned mutation unless explicitly contracted.
+
+Use focused Vitest coverage. Colocate feature logic. Move to `ontime-utils` only for genuine cross-package use.
+
+### State and boundaries
+
+- DAOs/data providers: persistence.
+- Stores: mutable runtime state.
+- Adapters/clients: external protocols and integrations.
+- Validators/parsers: protect boundaries before domain logic.
+- Commit state before dependent notifications or invalidations.
+
+Old layering exceptions are context, not precedent. Improve touched boundaries only through focused, behaviour-preserving moves.
+
+## Client
+
+- `common/api`: HTTP transport.
+- `common/hooks-query`: TanStack Query reads, mutations, keys, cache, invalidation.
+- `features`: reusable product capabilities and domain behaviour.
+- `views`: route-level composition.
+- `common`: genuinely cross-feature code.
+
+### Display views
+
+- Views are standalone. A view's behaviour lives in its own folder, with `<view>.options.ts` declaring its options, defaults and URL parsing, so one file shows how the view behaves. Repeating code across views is preferred to shared abstractions that couple them.
+- Existing global classes, element nesting and `--*-override` variables on display views (timer, backstage, countdown, studio, info) are a user contract. Rename or remove them only in a major, with a release note.
+- New stylable elements use BEM classes under the view's block. Avoid generic names such as `title` or `logo`.
+- A new `--*-override` variable is read in the view's styles as `var(--x-override, $default)`, with its default in `apps/client/src/theme/_viewerDefs.scss`, and listed with a comment in `apps/server/src/bundle/bundledCss.ts`.
+- Timeline and other complex views are not part of the contract beyond the shared variables.
+
+Keep substantial rules out of JSX, effects, and handlers. Use tested, colocated pure utilities. TanStack Query owns server state; established Zustand/context owns local state. No parallel caches.
+
+Rundown data has two sources. Editing surfaces mount `RundownScopeProvider` and read data, selection, and entry actions from that scope (`useRundown`, `useEventSelection`, `useEntryActionsContext`). Runtime-only surfaces use the `useLoaded*` hooks. Runtime state (playing event, playback) applies only when the scope `isLoaded`. Mutations resolve their cache key from the rundown ID they were sent with, never from the current scope. Rows of virtualised lists receive entry data as props from the list and never call rundown query hooks, since each mount would refetch the rundown. Memoised rows must receive everything they render as props: the entry from the query cache, metadata as primitives, and table layout and options; they read handlers only when an event fires.
+
+Limit subscriptions with selectors. Keep effect dependencies stable. Clean up listeners, intervals, external resources.
+Preserve previous Zustand snapshots when patching state so selectors and subscriptions can detect changes.
+
+## Shared packages
+
+- `ontime-types`: shared contracts; type-focused.
+- `ontime-utils`: environment-independent, side-effect-free shared logic.
+- Never import application layers into shared packages.
+- Keep feature-specific helpers with their owner, even when used by another file.
+
+## Review prompts
+
+- Business rule understandable/testable without app startup?
+- Transport, orchestration, state, transformation separated?
+- Existing owner reused without forcing unrelated behaviour?
+- Abstraction removes concepts rather than relocating them?
+- Smallest focused remedy clear?

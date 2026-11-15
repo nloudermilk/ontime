@@ -1,0 +1,355 @@
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { Day, EndAction, EntryId, Playback, TimeStrategy, TimerType } from 'ontime-types';
+import { isPlaybackActive } from 'ontime-utils';
+import { MouseEvent, useEffect, useRef } from 'react';
+import {
+  IoAdd,
+  IoDuplicateOutline,
+  IoFolder,
+  IoLink,
+  IoReorderTwo,
+  IoSwapVertical,
+  IoTrash,
+  IoUnlink,
+} from 'react-icons/io5';
+import { TbClockPin, TbFlagFilled, TbListNumbers } from 'react-icons/tb';
+
+import { useEntryActionsContext } from '../../../common/context/EntryActionsContext';
+import { useRundownScope } from '../../../common/context/RundownScopeContext';
+import { useContextMenu } from '../../../common/hooks/useContextMenu';
+import { useIsEntryCopyTarget } from '../../../common/stores/entryCopyStore';
+import { deviceAlt, deviceMod } from '../../../common/utils/deviceUtils';
+import { cx, getAccessibleColour } from '../../../common/utils/styleUtils';
+import { useRenumberCuesDialogStore } from '../renumber-cues-dialog/RenumberCuesDialog';
+import { useEventIdSwapping } from '../useEventIdSwapping';
+import { getSelectionMode, useEventSelection } from '../useEventSelection';
+import { GroupDurationFit } from './rundownEvent.utils';
+import RundownEventInner from './RundownEventInner';
+import RundownIndicators from './RundownIndicators';
+
+import style from './RundownEvent.module.scss';
+
+const groupDurationFitDescription = {
+  increase: 'Increase event duration to fit the group target',
+  decrease: 'Decrease event duration to fit the group target',
+};
+
+interface RundownEventProps {
+  eventId: EntryId;
+  cue: string;
+  timeStart: number;
+  timeEnd: number;
+  duration: number;
+  timeStrategy: TimeStrategy;
+  linkStart: boolean;
+  flag: boolean;
+  countToEnd: boolean;
+  eventIndex: number;
+  endAction: EndAction;
+  timerType: TimerType;
+  title: string;
+  note: string;
+  delay: number;
+  automationsEnabled?: boolean;
+  colour: string;
+  isPast: boolean;
+  isNext: boolean;
+  skip: boolean;
+  parent: EntryId | null;
+  groupDurationFit: GroupDurationFit;
+  loaded: boolean;
+  hasCursor: boolean;
+  playback?: Playback;
+  isRolling: boolean;
+  gap: number;
+  isNextDay: boolean;
+  dayOffset: Day;
+  totalGap: number;
+  isLinkedToLoaded: boolean;
+  hasTriggers: boolean;
+}
+
+export default function RundownEvent({
+  eventId,
+  cue,
+  timeStart,
+  timeEnd,
+  duration,
+  timeStrategy,
+  linkStart,
+  flag,
+  countToEnd,
+  eventIndex,
+  endAction,
+  timerType,
+  title,
+  note,
+  delay,
+  automationsEnabled,
+  colour,
+  isPast,
+  isNext,
+  skip = false,
+  parent,
+  groupDurationFit,
+  loaded,
+  hasCursor,
+  playback,
+  isRolling,
+  gap,
+  isNextDay,
+  dayOffset,
+  totalGap,
+  isLinkedToLoaded,
+  hasTriggers,
+}: RundownEventProps) {
+  'use memo';
+
+  const selectedEventId = useEventIdSwapping((state) => state.selectedEventId);
+  const setSelectedEventId = useEventIdSwapping((state) => state.setSelectedEventId);
+  const clearSelectedEventId = useEventIdSwapping((state) => state.clearSelectedEventId);
+  const openRenumberDialog = useRenumberCuesDialogStore((state) => state.onOpen);
+
+  const { updateEntry, batchUpdateEvents, clone, deleteEntry, groupEntries, swapEvents, matchGroupDuration } =
+    useEntryActionsContext();
+
+  const isSelected = useEventSelection((state) => state.selectedEvents.has(eventId));
+  const unselect = useEventSelection((state) => state.unselect);
+  const clearSelectedEvents = useEventSelection((state) => state.clearSelectedEvents);
+  const selectEntry = useEventSelection((state) => state.setSelectedEvents);
+
+  const { selectionStore } = useRundownScope();
+  const isCopyTarget = useIsEntryCopyTarget(eventId);
+
+  const handleRef = useRef<null | HTMLDivElement>(null);
+
+  const [onContextMenu] = useContextMenu<HTMLDivElement>(() => {
+    const { selectedEvents } = selectionStore.getState();
+    return selectedEvents.size > 1
+      ? [
+          { type: 'header', label: `${selectedEvents.size} events selected` },
+          {
+            type: 'item',
+            label: 'Link to previous',
+            icon: IoLink,
+            onClick: () => {
+              batchUpdateEvents({ linkStart: true }, Array.from(selectedEvents));
+            },
+          },
+          {
+            type: 'item',
+            label: 'Unlink from previous',
+            icon: IoUnlink,
+            onClick: () => {
+              batchUpdateEvents({ linkStart: false }, Array.from(selectedEvents));
+            },
+          },
+          { type: 'divider' },
+          {
+            type: 'item',
+            label: 'Group',
+            icon: IoFolder,
+            onClick: () => {
+              groupEntries(Array.from(selectedEvents));
+              clearSelectedEvents();
+            },
+            disabled: parent !== null,
+          },
+          { type: 'divider' },
+          {
+            type: 'item',
+            label: 'Renumber cues',
+            icon: TbListNumbers,
+            onClick: openRenumberDialog,
+          },
+          { type: 'divider' },
+          {
+            type: 'item',
+            label: 'Delete',
+            icon: IoTrash,
+            onClick: () => {
+              clearSelectedEvents();
+              deleteEntry(Array.from(selectedEvents));
+            },
+          },
+        ]
+      : [
+          {
+            type: 'item',
+            label: flag ? 'Remove flag' : 'Add flag',
+            icon: TbFlagFilled,
+            onClick: () => {
+              updateEntry({ id: eventId, flag: !flag });
+            },
+          },
+          {
+            type: 'item',
+            label: 'Match Group Target Duration',
+            description: groupDurationFit ? groupDurationFitDescription[groupDurationFit] : '',
+            icon: TbClockPin,
+            onClick: () => {
+              if (!parent) return;
+              matchGroupDuration(eventId);
+            },
+            disabled: groupDurationFit === null,
+          },
+          { type: 'divider' },
+          {
+            type: 'item',
+            label: 'Add to swap',
+            icon: IoAdd,
+            onClick: () => setSelectedEventId(eventId),
+          },
+          {
+            type: 'item',
+            label: `Swap this event with ${selectedEventId ?? ''}`,
+            icon: IoSwapVertical,
+            onClick: () => {
+              if (!selectedEventId) return;
+              swapEvents(selectedEventId, eventId);
+              clearSelectedEventId();
+            },
+            disabled: selectedEventId == null || selectedEventId === eventId,
+          },
+          {
+            type: 'item',
+            label: 'Clone',
+            icon: IoDuplicateOutline,
+            shortcut: `${deviceMod}+D`,
+            onClick: () => clone(eventId, { after: eventId }),
+          },
+          { type: 'divider' },
+          {
+            type: 'item',
+            label: 'Delete',
+            icon: IoTrash,
+            shortcut: `${deviceAlt}+Backspace`,
+            onClick: () => {
+              deleteEntry([eventId]);
+              unselect(eventId);
+            },
+          },
+        ];
+  });
+
+  const {
+    isDragging,
+    attributes: dragAttributes,
+    listeners: dragListeners,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({
+    id: eventId,
+    data: {
+      type: 'event',
+      parent,
+    },
+    animateLayoutChanges: () => false,
+  });
+
+  const dragStyle = {
+    zIndex: isDragging ? 2 : 'inherit',
+    opacity: isDragging ? 0.5 : undefined,
+    transform: CSS.Translate.toString(transform),
+    transition,
+  };
+
+  const binderColours = colour && getAccessibleColour(colour);
+
+  // move focus to element if necessary
+  useEffect(() => {
+    if (!hasCursor || handleRef?.current == null) {
+      return;
+    }
+
+    const elementInFocus = document.activeElement;
+    // we know the group is the grandparent of our binder
+    const blockElement = handleRef.current.closest('#event-group');
+
+    // we only move focus if the block doesnt already contain focus
+    if (blockElement && !blockElement.contains(elementInFocus)) {
+      handleRef.current.focus();
+    }
+  }, [hasCursor]);
+
+  const blockClasses = cx([
+    style.rundownEvent,
+    skip && style.skip,
+    isPast && style.past,
+    loaded && style.loaded,
+    playback && style[playback],
+    isSelected && style.selected,
+    hasCursor && style.hasCursor,
+    isCopyTarget && style.copyTarget,
+  ]);
+
+  const handleFocusClick = (event: MouseEvent) => {
+    event.stopPropagation();
+
+    // UI indexes are 1 based
+    const index = eventIndex - 1;
+    const editMode = getSelectionMode(event);
+    selectEntry({ id: eventId, index, selectMode: editMode });
+  };
+
+  const handleContextMenu = (event: MouseEvent<HTMLDivElement>) => {
+    // right-clicking outside the selection targets the clicked event instead
+    if (!selectionStore.getState().selectedEvents.has(eventId)) {
+      selectEntry({ id: eventId, index: eventIndex - 1, selectMode: 'click' });
+    }
+    onContextMenu(event);
+  };
+
+  const isPlaying = playback ? isPlaybackActive(playback) : false;
+
+  return (
+    <div
+      className={blockClasses}
+      ref={setNodeRef}
+      style={dragStyle}
+      onClick={handleFocusClick}
+      onContextMenu={handleContextMenu}
+      data-testid='rundown-event'
+      data-selected={isSelected}
+      {...(isPlaying ? { 'data-running': true } : {})}
+    >
+      <RundownIndicators timeStart={timeStart} delay={delay} gap={gap} isNextDay={isNextDay} />
+
+      <div className={style.binder} style={{ ...binderColours }} ref={handleRef} {...dragAttributes} {...dragListeners}>
+        <span className={style.drag}>
+          <IoReorderTwo />
+        </span>
+        <span className={style.cue}>{cue}</span>
+      </div>
+
+      <RundownEventInner
+        timeStart={timeStart}
+        timeEnd={timeEnd}
+        duration={duration}
+        linkStart={linkStart}
+        countToEnd={countToEnd}
+        timeStrategy={timeStrategy}
+        eventId={eventId}
+        eventIndex={eventIndex}
+        endAction={endAction}
+        timerType={timerType}
+        title={title}
+        note={note}
+        delay={delay}
+        automationsEnabled={automationsEnabled}
+        isNext={isNext}
+        skip={skip}
+        loaded={loaded}
+        playback={playback}
+        isRolling={isRolling}
+        dayOffset={dayOffset}
+        isPast={isPast}
+        totalGap={totalGap}
+        isLinkedToLoaded={isLinkedToLoaded}
+        hasTriggers={hasTriggers}
+      />
+    </div>
+  );
+}

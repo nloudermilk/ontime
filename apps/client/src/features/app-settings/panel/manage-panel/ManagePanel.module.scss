@@ -1,0 +1,24 @@
+.halfWidth {
+  width: 50%;
+}
+
+.fullWidth {
+  width: 100%;
+}
+
+.twoCols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.formColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.current {
+  // marker consumed by the shared Panel.Table active-row treatment
+  background-color: inherit;
+}

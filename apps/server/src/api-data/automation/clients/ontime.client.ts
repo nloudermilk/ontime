@@ -1,0 +1,91 @@
+import { LogOrigin, OntimeAction, RuntimeStore } from 'ontime-types';
+import { parseUserTime } from 'ontime-utils';
+import { DeepReadonly } from 'ts-essentials';
+
+import { auxTimerService } from '../../../services/aux-timer-service/auxTimer.service.js';
+import * as messageService from '../../../services/message-service/message.service.js';
+import { runtimeService } from '../../../services/runtime-service/runtime.service.js';
+import * as logger from '../../logs/logs.service.js';
+import { parseTemplateNested } from '../automation.utils.js';
+
+export function toOntimeAction(action: OntimeAction, store: DeepReadonly<RuntimeStore>) {
+  const actionType = action.action;
+  switch (actionType) {
+    // Aux timer actions
+    case 'aux1-start':
+      return auxTimerService.start(1);
+    case 'aux1-stop':
+      return auxTimerService.stop(1);
+    case 'aux1-pause':
+      return auxTimerService.pause(1);
+    case 'aux1-set': {
+      const time = parseUserTime(action.time);
+      return auxTimerService.setTime(time, 1);
+    }
+    case 'aux2-start':
+      return auxTimerService.start(2);
+    case 'aux2-stop':
+      return auxTimerService.stop(2);
+    case 'aux2-pause':
+      return auxTimerService.pause(2);
+    case 'aux2-set': {
+      const time = parseUserTime(action.time);
+      return auxTimerService.setTime(time, 2);
+    }
+    case 'aux3-start':
+      return auxTimerService.start(3);
+    case 'aux3-stop':
+      return auxTimerService.stop(3);
+    case 'aux3-pause':
+      return auxTimerService.pause(3);
+    case 'aux3-set': {
+      const time = parseUserTime(action.time);
+      return auxTimerService.setTime(time, 3);
+    }
+
+    // Playback actions
+    case 'playback-start':
+      return runtimeService.start();
+    case 'playback-stop':
+      return runtimeService.stop();
+    case 'playback-pause':
+      return runtimeService.pause();
+    case 'playback-roll':
+      return runtimeService.roll();
+
+    // Message actions
+    case 'message-set': {
+      messageService.patch({
+        timer: {
+          text: action.text ? parseTemplateNested(action.text, store) : action.text,
+          visible: action.visible,
+        },
+      });
+      break;
+    }
+    case 'message-secondary': {
+      const secondary = action.text ? parseTemplateNested(action.text, store) : action.text;
+      const patch =
+        action.secondarySource === undefined
+          ? { secondary }
+          : {
+              timer: {
+                secondarySource: action.secondarySource,
+              },
+              secondary,
+            };
+
+      messageService.patch(patch);
+      break;
+    }
+
+    default: {
+      actionType satisfies never;
+      logger.warning(LogOrigin.Automation, 'Ontime action skipped', {
+        reason: 'unknown-action',
+        action: String(actionType),
+      });
+      break;
+    }
+  }
+}

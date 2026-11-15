@@ -1,0 +1,60 @@
+.presetSection {
+  background-color: $gray-1350;
+  border: 1px solid $white-10;
+  border-radius: $component-border-radius-md;
+  margin-bottom: 0.75rem;
+}
+
+.header {
+  padding: 0.5rem 1rem;
+  min-height: 2.25rem;
+  display: flex;
+  align-items: center;
+
+  color: $gray-300;
+}
+
+.presetList {
+  padding-bottom: 0.5rem;
+  border-top: 1px solid $white-7;
+  max-height: 10rem;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.preset {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0.375rem 1rem;
+  font-size: $inner-section-text-size;
+
+  &.active {
+    background-color: $bg-active;
+    box-shadow: inset 3px 0 $blue-400;
+    color: $ui-white;
+    font-weight: 600;
+  }
+}
+
+.presetName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presetActions {
+  margin-left: auto;
+}
+
+.current {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+  color: $blue-400;
+  font-size: $aux-text-size;
+  font-weight: 600;
+}

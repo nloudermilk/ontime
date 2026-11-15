@@ -1,0 +1,197 @@
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { EntryId, OntimeGroup } from 'ontime-types';
+import { MILLIS_PER_MINUTE } from 'ontime-utils';
+import { MouseEvent, useCallback } from 'react';
+import {
+  IoChevronDown,
+  IoChevronUp,
+  IoDuplicateOutline,
+  IoFolderOpenOutline,
+  IoReorderTwo,
+  IoTrash,
+  IoLockClosed,
+} from 'react-icons/io5';
+import { TbClockPin } from 'react-icons/tb';
+
+import IconButton from '../../../common/components/buttons/IconButton';
+import Tag from '../../../common/components/tag/Tag';
+import Tooltip from '../../../common/components/tooltip/Tooltip';
+import { useEntryActionsContext } from '../../../common/context/EntryActionsContext';
+import { useContextMenu } from '../../../common/hooks/useContextMenu';
+import { useIsEntryCopyTarget } from '../../../common/stores/entryCopyStore';
+import { deviceAlt, deviceMod } from '../../../common/utils/deviceUtils';
+import { cx, getAccessibleColour } from '../../../common/utils/styleUtils';
+import { formatDuration, formatTime } from '../../../common/utils/time';
+import TitleEditor from '../common/TitleEditor';
+import { useEventSelection } from '../useEventSelection';
+
+import style from './RundownGroup.module.scss';
+
+interface RundownGroupProps {
+  data: OntimeGroup;
+  hasCursor: boolean;
+  collapsed: boolean;
+  onCollapse: (collapsed: boolean, groupId: EntryId) => void;
+}
+
+//TODO: the group should maybe include a multiple day indicator
+export default function RundownGroup({ data, hasCursor, collapsed, onCollapse }: RundownGroupProps) {
+  'use memo';
+
+  const { clone, ungroup, deleteEntry, updateEntry } = useEntryActionsContext();
+
+  const selectSingleEntry = useEventSelection((state) => state.setSingleEntrySelection);
+  const isCopyTarget = useIsEntryCopyTarget(data.id);
+
+  const isDurationMatching = data.targetDuration !== null && data.targetDuration === data.duration;
+
+  const [planOffset, offset] = (() => {
+    if (data.targetDuration === null) {
+      return [null, 0];
+    }
+
+    const offset = data.duration - data.targetDuration;
+    if (offset === 0) {
+      return [null, 0];
+    }
+    const absOffset = Math.abs(offset);
+    return [`${offset < 0 ? '-' : '+'}${formatDuration(absOffset, absOffset > 2 * MILLIS_PER_MINUTE)}`, offset];
+  })();
+
+  const matchDuration = useCallback(() => {
+    updateEntry({ id: data.id, targetDuration: data.duration });
+  }, [data.duration, data.id, updateEntry]);
+
+  const [onContextMenu] = useContextMenu<HTMLDivElement>(() => [
+    {
+      type: 'item',
+      label: 'Clone Group',
+      icon: IoDuplicateOutline,
+      shortcut: `${deviceMod}+D`,
+      onClick: () => clone(data.id),
+    },
+    {
+      type: 'item',
+      label: 'Ungroup',
+      icon: IoFolderOpenOutline,
+      onClick: () => ungroup(data.id),
+      disabled: data.entries.length === 0,
+    },
+    { type: 'divider' },
+    {
+      type: 'item',
+      label: 'Match Content Duration',
+      icon: TbClockPin,
+      onClick: matchDuration,
+      disabled: isDurationMatching,
+      description:
+        offset > 0
+          ? "Increase group target duration to match it's contents"
+          : "Decrease group target duration to match it's contents",
+    },
+    { type: 'divider' },
+    {
+      type: 'item',
+      label: 'Delete Group',
+      icon: IoTrash,
+      shortcut: `${deviceAlt}+Backspace`,
+      onClick: () => deleteEntry([data.id]),
+    },
+  ]);
+
+  const {
+    attributes: dragAttributes,
+    listeners: dragListeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: data.id,
+    data: {
+      type: 'group',
+    },
+    animateLayoutChanges: () => false,
+  });
+
+  const handleFocusClick = (event: MouseEvent) => {
+    event.stopPropagation();
+
+    selectSingleEntry({ id: data.id });
+  };
+
+  const handleContextMenu = (event: MouseEvent<HTMLDivElement>) => {
+    // the menu acts on this entry alone, so the selection should show that
+    selectSingleEntry({ id: data.id });
+    onContextMenu(event);
+  };
+
+  const binderColours = data.colour && getAccessibleColour(data.colour);
+
+  const dragStyle = {
+    zIndex: isDragging ? 2 : 'inherit',
+    opacity: isDragging ? 0.5 : undefined,
+    transform: CSS.Translate.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      className={cx([
+        style.group,
+        hasCursor && style.hasCursor,
+        !collapsed && style.expanded,
+        isCopyTarget && style.copyTarget,
+      ])}
+      ref={setNodeRef}
+      onClick={handleFocusClick}
+      onContextMenu={handleContextMenu}
+      style={{
+        ...dragStyle,
+        '--user-bg': data.colour || '#929292',
+      }}
+      data-testid='rundown-group'
+    >
+      <div className={style.binder} style={{ ...binderColours }} {...dragAttributes} {...dragListeners}>
+        <span className={style.drag}>
+          <IoReorderTwo />
+        </span>
+      </div>
+      <div className={style.header}>
+        <div className={style.titleRow}>
+          <TitleEditor title={data.title} entryId={data.id} placeholder='Group title' />
+          <IconButton aria-label='Collapse' variant='subtle-white' onClick={() => onCollapse(!collapsed, data.id)}>
+            {collapsed ? <IoChevronUp /> : <IoChevronDown />}
+          </IconButton>
+        </div>
+        <div className={style.metaRow}>
+          <div className={style.metaEntry}>
+            <div className={style.metaLabel}>Entries</div>
+            <div>{data.entries.length}</div>
+          </div>
+          <div className={style.metaEntry}>
+            <div className={style.metaLabel}>Start</div>
+            <div>{formatTime(data.timeStart)}</div>
+          </div>
+          <div className={style.metaEntry}>
+            <div className={style.metaLabel}>End</div>
+            <div>{formatTime(data.timeEnd)}</div>
+          </div>
+          <Tooltip text={'Group has target duration'} disabled={data.targetDuration === null}>
+            <div className={style.metaEntry}>
+              <div className={style.metaLabel}>
+                Duration
+                {data.targetDuration !== null && <IoLockClosed className={style.lockIcon} />}
+              </div>
+              <div className={cx([style.duration, planOffset && style.warning])}>
+                <span className={style.strike}>{formatDuration(data.duration)}</span>
+                {planOffset && <Tag className={style.offsetLabel}>{planOffset}</Tag>}
+              </div>
+            </div>
+          </Tooltip>
+        </div>
+      </div>
+    </div>
+  );
+}
